@@ -57,7 +57,13 @@ _check_history: Dict[str, list] = {}  # monitor_id -> list of MetricDataPoint
 
 @app.get("/health", tags=["system"])
 async def health_check():
-    return {"status": "ok", "monitor_count": len(_monitors)}
+    """Health check endpoint (unauthenticated)."""
+    return {
+        "status": "ok",
+        "monitor_count": len(_monitors),
+        "history_records": sum(len(h) for h in _check_history.values()),
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+    }
 
 
 @app.post(
@@ -75,21 +81,32 @@ async def create_monitor(
     Create an uptime monitor for the given URL.
 
     Requires an active Mainlayer subscription (Bearer token).
+    Subscription is verified on every request via Mainlayer.
     """
-    monitor = Monitor(
-        name=payload.name,
-        url=payload.url,
-        monitor_type=payload.monitor_type,
-        interval_seconds=payload.interval_seconds,
-        timeout_seconds=payload.timeout_seconds,
-        expected_status_code=payload.expected_status_code,
-        regions=payload.regions,
-        owner_id=token[:16],  # use first 16 chars of token as owner ref
-    )
-    _monitors[monitor.id] = monitor
-    _check_history[monitor.id] = []
-    logger.info("Monitor created: %s (%s)", monitor.id, monitor.url)
-    return monitor
+    try:
+        # Validate URL format
+        from urllib.parse import urlparse
+        parsed = urlparse(payload.url)
+        if not parsed.scheme or parsed.scheme not in ("http", "https", "tcp"):
+            raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+
+        monitor = Monitor(
+            name=payload.name,
+            url=payload.url,
+            monitor_type=payload.monitor_type,
+            interval_seconds=payload.interval_seconds,
+            timeout_seconds=payload.timeout_seconds,
+            expected_status_code=payload.expected_status_code,
+            regions=payload.regions,
+            owner_id=token[:16],  # use first 16 chars of token as owner ref
+        )
+        _monitors[monitor.id] = monitor
+        _check_history[monitor.id] = []
+        logger.info("Monitor created: %s (%s) for %s", monitor.id, monitor.url, monitor.owner_id)
+        return monitor
+    except ValueError as e:
+        logger.warning("Invalid monitor configuration: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get(
